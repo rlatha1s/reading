@@ -1,0 +1,63 @@
+'use client';
+import { useCallback, useEffect, useState } from 'react';
+import { BookOpen, Check, ArrowUpRight } from 'lucide-react';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogClose } from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import { MEMBERS, START_DATE, today, readingDates, defaultReadingDate, READING_SCHEDULE, monthDates, type Attendance } from '@/lib/attendance/domain';
+import { createRepository, api } from '@/lib/attendance/repository';
+export default function Home() {
+ const [date, setDate] = useState(''); const [readingDate, setReadingDate] = useState(''); const [month, setMonth] = useState('2026-09');
+ const [person, setPerson] = useState<string | null>(null); const [records, setRecords] = useState<Attendance[]>([]);
+ const [viewMember, setViewMember] = useState<{id:string;name:string} | null>(null);
+ const [reflections, setReflections] = useState<Attendance[]>([]);
+ const [reflectionLoading, setReflectionLoading] = useState(false);
+ const [reflectionError, setReflectionError] = useState('');
+ const [count, setCount] = useState(0);
+ const [adminRecords, setAdminRecords] = useState<Attendance[]>([]);
+ const [statusReady, setStatusReady] = useState(false);
+ const [statusError, setStatusError] = useState('');
+ const [reflection, setReflection] = useState('');
+ const [ready, setReady] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+ const refresh = useCallback(async () => { try { const summary = await api<{count:number;date:string}>('/api/summary'); setCount(summary.count); setDate(summary.date); setReady(true); setError(''); } catch { setReady(false); setError('기록을 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.'); } }, []);
+ useEffect(() => { const d = today(); setDate(d); setReadingDate(defaultReadingDate()); setMonth(d < START_DATE ? '2026-09' : d.slice(0,7)); void refresh();
+ const update = () => { setDate(today());  void refresh(); }; const timer = setInterval(update, 30000);
+ window.addEventListener('storage', update); window.addEventListener('focus', update);
+ return () => { clearInterval(timer); window.removeEventListener('storage',update); window.removeEventListener('focus',update); }; }, [refresh]);
+ useEffect(() => {
+ type Tool = { name: string; description: string; inputSchema: object; annotations: { readOnlyHint: boolean }; execute: (input: unknown) => Promise<unknown> };
+ const context = (document as Document & { modelContext?: { registerTool: (tool: Tool, options: { signal: AbortSignal }) => void | Promise<void> } }).modelContext;
+ if (!context?.registerTool) return;
+ const lifecycle = new AbortController();
+ const tool: Tool = { name: 'submit_reading_attendance', description: '선택한 명단 ID와 읽은 날짜로 성경통독 인증을 저장합니다. 일정표에 있는 2026년 9월 7일부터 12월 8일까지의 통독 일정 날짜를 선택합니다. 묵상은 선택 사항입니다. 같은 이름과 날짜로 다시 제출하면 마지막 내용으로 덮어씁니다.', inputSchema: { type: 'object', properties: { memberId: { type: 'string', enum: MEMBERS.map(m => m.id) }, date: { type: 'string', format: 'date' }, reflection: { type: 'string' } }, required: ['memberId', 'date'], additionalProperties: false }, annotations: { readOnlyHint: false }, async execute(input) {
+ if (!input || typeof input !== 'object' || !('memberId' in input) || !('date' in input) || typeof input.memberId !== 'string' || typeof input.date !== 'string') throw new Error('이름과 날짜가 필요합니다.');
+ if ('reflection' in input && typeof input.reflection !== 'string') throw new Error('묵상은 글로 입력해 주세요.');
+ await createRepository().checkIn(input.memberId, input.date, 'reflection' in input ? input.reflection as string : undefined);
+ setRecords(rows => [...rows.filter(r => r.memberId !== input.memberId || r.date !== input.date), {memberId:input.memberId as string,date:input.date as string,checkedAt:new Date().toISOString()}]); setPerson(input.memberId); setReadingDate(input.date); setDate(today()); await refresh();
+ return { memberId: input.memberId, date: input.date, status: 'recorded' };
+ } };
+ try { void Promise.resolve(context.registerTool(tool, { signal: lifecycle.signal })).catch(() => {}); } catch { /* Optional browser capability; form remains available. */ }
+ return () => lifecycle.abort();
+ }, [refresh]);
+ useEffect(() => { let active = true; const reload = async () => { try { const rows = await createRepository().list(); if (active) { setAdminRecords(rows); setStatusReady(true); setStatusError(''); } } catch { if (active) { setStatusReady(false); setStatusError('통독 현황을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.'); } } }; void reload(); const timer = setInterval(reload,30000); window.addEventListener('focus',reload); return () => { active=false; clearInterval(timer); window.removeEventListener('focus',reload); }; },[records]);
+ useEffect(() => { if (!viewMember) return; let active=true; setReflections([]); setReflectionLoading(true); setReflectionError(''); api<Attendance[]>('/api/reflections?memberId='+encodeURIComponent(viewMember.id)).then(rows => { if(active) setReflections(rows); }).catch(() => { if(active) setReflectionError('묵상을 불러오지 못했습니다. 창을 닫고 다시 열어 주세요.'); }).finally(() => { if(active) setReflectionLoading(false); }); return () => { active=false; }; },[viewMember,records]);
+ const record = records.find(r => r.memberId === person && r.date === readingDate);
+ const done = Boolean(record);
+ const allowedDates = readingDates();
+
+ const selected = MEMBERS.find(m => m.id === person);
+ const dates = monthDates(month); const marked = new Set(adminRecords.map(r => `${r.memberId}:${r.date}`));
+ async function checkIn() { if (!person || busy) return; setBusy(true); setError(''); try { await createRepository().checkIn(person, readingDate, reflection); setRecords(rows => [...rows.filter(r => r.memberId !== person || r.date !== readingDate), {memberId:person,date:readingDate,reflection,checkedAt:new Date().toISOString()}]); setDate(today()); await refresh(); } catch { setError('인증을 저장하지 못했습니다. 인터넷 연결과 날짜를 확인하고 다시 시도해 주세요.'); } finally { setBusy(false); } }
+ return <div className="shell"><header className="topbar"><a href="/" className="brand"><span className="brand-icon"><BookOpen size={23}/></span>함께 읽는 말씀</a><span className="edition">성경통독 · 2026</span></header>
+ <main><Tabs defaultValue="check"><div className="navrow"><TabsList className="view-tabs"><TabsTrigger value="check">읽음 인증</TabsTrigger><TabsTrigger value="admin">통독 현황</TabsTrigger></TabsList><span className="start">2026.09.07 시작</span></div>
+ {error && <div role="alert" className="error">{error}</div>}
+ <TabsContent value="check"><div className="reader-grid"><section className="intro"><p className="eyebrow">DAILY BIBLE READING</p><h1 className="church-title">복음충신교회<br/><span>신약 성경 지혜서 읽기</span></h1><p className="description">성경을 읽은 날을 기록하세요.<br/>이름과 날짜를 선택하고 제출해 주세요.</p><div className="date-block"><span>오늘의 날짜 · 한국 시간</span><strong>{date ? date.replaceAll('-', '. ') : '날짜 확인 중'}</strong></div><div className="community"><span className="dot"/>오늘 <strong>{ready ? count : '–'}명</strong>이 함께 읽었어요<span className="total">/ {MEMBERS.length}명</span></div></section>
+ <section className="check-card"><div className="card-heading"><span className="eyebrow">READ & CHECK</span><BookOpen size={26}/></div><h2>성경 통독 인증</h2><label id="person-label">내 이름</label><Select disabled={busy} value={person} onValueChange={value => { setPerson(value); setReflection(records.find(r => r.memberId === value && r.date === readingDate)?.reflection ?? ''); }} items={MEMBERS.map(m => ({ value: m.id, label: m.name }))}><SelectTrigger aria-labelledby="person-label" className="name-select"><SelectValue placeholder="이름을 선택해 주세요"/></SelectTrigger><SelectContent>{MEMBERS.map(m => <SelectItem key={m.id} value={m.id} className="py-2 text-base">{m.name}</SelectItem>)}</SelectContent></Select><label id="reading-date-label">읽은 날짜</label><Select disabled={busy} value={readingDate} onValueChange={value => { setReadingDate(value ?? ''); setReflection(records.find(r => r.memberId === person && r.date === value)?.reflection ?? ''); }} items={READING_SCHEDULE.map(entry => ({ value: entry.date, label: entry.label }))}><SelectTrigger aria-labelledby="reading-date-label" className="name-select schedule-select"><SelectValue placeholder="날짜를 선택해 주세요"/></SelectTrigger><SelectContent className="schedule-options" alignItemWithTrigger={false}>{READING_SCHEDULE.map(entry => <SelectItem key={entry.date} value={entry.date} className="schedule-option py-2 text-base">{entry.label}</SelectItem>)}</SelectContent></Select>{date && !allowedDates.includes(date) && <p className="reflection-disclosure">오늘은 통독 일정이 없는 날입니다. 인증할 날짜를 선택해 주세요.</p>}<label htmlFor="reflection">은혜받은 구절이나 묵상을 기록해주세요 <span className="optional">(선택)</span></label><Textarea id="reflection" maxLength={2000} className="reflection-input" placeholder="마음에 남은 말씀이나 묵상을 자유롭게 적어 주세요." value={reflection} disabled={busy} onChange={e => setReflection(e.target.value)}/><p className="reflection-disclosure">남긴 묵상은 통독 현황에서 이름을 누르면 누구나 볼 수 있습니다.</p>
+
+ <div className={`reading-state ${done ? 'complete' : ''}`} aria-live="polite"><span className="state-symbol">{done ? <Check/> : <BookOpen/>}</span><strong>{done ? `${selected?.name}님, 읽음이 기록되었어요!` : selected ? `${selected.name}님, 읽음을 기록해 주세요.` : '말씀을 읽고 이곳에 기록해 주세요.'}</strong><span>{done ? '저장되었습니다. 내용을 수정하고 다시 제출할 수 있습니다.' : '선택한 날짜에 성경을 읽었음을 인증합니다.'}</span></div>
+ <button className="submit" disabled={!person || !ready || busy || !allowedDates.includes(readingDate)} onClick={checkIn}>{busy ? '저장하는 중…' : done ? '다시 제출' : date && date < START_DATE ? '9월 7일부터 인증할 수 있어요' : '제출'}{done ? <Check size={20}/> : <ArrowUpRight size={20}/>}</button><p className="card-foot">같은 이름과 날짜로 다시 제출하면 마지막 내용으로 바뀝니다. 묵상을 비우고 제출하면 이전 묵상도 지워집니다.</p></section></div></TabsContent>
+ <TabsContent value="admin"><section className="admin"><div className="admin-heading"><div><p className="eyebrow">READING ATTENDANCE</p><h1>함께 읽은 날들</h1><p className="muted">이름을 누르면 날짜별 묵상 기록을 볼 수 있습니다.</p></div><label className="month-label">조회 월<input type="month" min="2026-09" value={month} onChange={e => setMonth(e.target.value)}/></label></div><div className="table-meta"><strong>{month.replace('-', '년 ')}월 출석부</strong><span><b className="legend-o">O</b> 인증 완료 <b className="legend-x">X</b> 미인증</span></div>{!statusReady ? <p className="loading" role={statusError ? 'alert' : 'status'}>{statusError || '기록을 불러오는 중…'}</p> : dates.length ? <div className="attendance-table"><Table><TableHeader><TableRow><TableHead className="name-col">이름</TableHead>{dates.map(d => <TableHead key={d} className={d === date ? 'today-col' : ''}><span>{Number(d.slice(5,7))}/{Number(d.slice(8))}</span>{d === date && <small>오늘</small>}</TableHead>)}</TableRow></TableHeader><TableBody>{MEMBERS.map(m => <TableRow key={m.id}><TableHead scope="row" className="name-col"><button className="member-link" onClick={() => { setReflections([]); setReflectionLoading(true); setViewMember(m); }} aria-label={`${m.name}님의 묵상 보기`}>{m.name}</button></TableHead>{dates.map(d => { const yes = marked.has(`${m.id}:${d}`); return <TableCell key={d} className={d === date ? 'today-col' : ''}><span className={yes ? 'mark yes' : 'mark no'} aria-label={`${m.name} ${d} ${yes ? '인증 완료' : '미인증'}`}>{yes ? 'O' : 'X'}</span></TableCell>; })}</TableRow>)}</TableBody></Table></div> : <p className="loading">2026년 9월 이후의 월을 선택해 주세요.</p>}<p className="table-note">9월 7일부터 평일(월~금)만 표시합니다. 9월 24·25일은 추석 연휴로 쉽니다. 아직 오지 않은 날짜도 인증 기록이 없으면 X로 표시됩니다.</p></section></TabsContent>
+ </Tabs><Dialog open={Boolean(viewMember)} onOpenChange={open => { if(!open) setViewMember(null); }}><DialogContent className="reflection-dialog" showCloseButton={false}><div className="reflection-dialog-heading"><DialogTitle className="text-xl font-bold">{viewMember?.name}님의 묵상</DialogTitle><DialogClose className="dialog-close">닫기</DialogClose></div><DialogDescription>성경을 읽으며 남긴 구절과 묵상입니다. 최근 기록부터 표시합니다.</DialogDescription><div className="reflection-history" aria-live="polite">{reflectionLoading ? <p>묵상을 불러오는 중…</p> : reflectionError ? <p role="alert">{reflectionError}</p> : reflections.length ? reflections.map(r => <article key={r.date} className="reflection-entry"><time dateTime={r.date}>{r.date.replaceAll('-', '. ')}</time><p>{r.reflection}</p></article>) : <p className="muted">아직 남긴 묵상이 없습니다.</p>}</div></DialogContent></Dialog></main><footer><span>함께 읽는 말씀</span><p>기록은 온라인에 저장됩니다. 통독 현황은 누구나 확인할 수 있습니다.</p></footer></div>;
+}
